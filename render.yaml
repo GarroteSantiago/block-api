@@ -1,0 +1,13 @@
+# Optional Render Blueprint. For auto-detection Render expects this file at the
+# repo root (which it is here). If you deploy from the dashboard instead
+# (see README.md), you don't need it — it just documents the settings.
+services:
+  - type: web
+    name: block-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
