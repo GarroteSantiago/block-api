@@ -68,3 +68,71 @@ class PublishProfile(BaseModel):
     name: str
     description: str
     restrictions: list[Restriction]
+
+
+# --- Friend groups (GroupApiService) ---------------------------------------
+# The caller's identity travels in the X-User-Id / X-User-Name headers (the
+# Firebase uid + display name). Demo-grade: the uid is trusted, not verified.
+
+class GroupMember(BaseModel):
+    """A member and their leaderboard value (cumulative focus seconds)."""
+    uid: str
+    displayName: str
+    focusSeconds: int
+    isOwner: bool
+
+
+class SharedProfile(BaseModel):
+    """A blocking profile shared into a group (a snapshot, not a live link)."""
+    id: str
+    name: str
+    description: str
+    restrictions: list[Restriction]
+    sharedByUid: str
+    sharedByName: str
+
+
+class GroupSummary(BaseModel):
+    """A group as it appears in the caller's group list."""
+    id: str
+    name: str
+    memberCount: int
+
+
+class GroupDetail(BaseModel):
+    """Full group view: members ranked by focus time, plus shared profiles."""
+    id: str
+    name: str
+    ownerUid: str
+    members: list[GroupMember]        # sorted by focusSeconds desc (leaderboard)
+    sharedProfiles: list[SharedProfile]
+
+
+class CreateGroupRequest(BaseModel):
+    name: str
+
+
+class JoinGroupRequest(BaseModel):
+    token: str
+
+
+class InviteResponse(BaseModel):
+    token: str
+    link: str
+
+
+class InvitePreview(BaseModel):
+    """Shown before joining: which group a token points at."""
+    groupId: str
+    groupName: str
+
+
+class ShareProfileRequest(BaseModel):
+    id: str
+    name: str
+    description: str
+    restrictions: list[Restriction]
+
+
+class ReportFocusRequest(BaseModel):
+    focusSeconds: int

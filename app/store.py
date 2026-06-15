@@ -12,16 +12,25 @@ always read/written together with their profile.
 """
 
 import json
+import secrets
 import sqlite3
 import time
+import uuid
 from pathlib import Path
 
 from .models import (
+    CreateGroupRequest,
+    GroupDetail,
+    GroupMember,
+    GroupSummary,
+    InvitePreview,
     ProfileDetail,
     ProfileSearchResult,
     ProfileSync,
     PublishProfile,
     Restriction,
+    ShareProfileRequest,
+    SharedProfile,
 )
 
 DB_PATH = Path(__file__).resolve().parent.parent / "block.db"
@@ -60,6 +69,40 @@ def init_db() -> None:
                 description  TEXT NOT NULL,
                 author_name  TEXT NOT NULL,
                 restrictions TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS groups (
+                id         TEXT PRIMARY KEY,
+                name       TEXT NOT NULL,
+                owner_uid  TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS group_members (
+                group_id      TEXT NOT NULL,
+                uid           TEXT NOT NULL,
+                display_name  TEXT NOT NULL,
+                focus_seconds INTEGER NOT NULL DEFAULT 0,
+                joined_at     INTEGER NOT NULL,
+                PRIMARY KEY (group_id, uid)
+            );
+
+            CREATE TABLE IF NOT EXISTS group_invites (
+                token      TEXT PRIMARY KEY,
+                group_id   TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS group_profiles (
+                group_id       TEXT NOT NULL,
+                profile_id     TEXT NOT NULL,
+                name           TEXT NOT NULL,
+                description    TEXT NOT NULL,
+                restrictions   TEXT NOT NULL,
+                shared_by_uid  TEXT NOT NULL,
+                shared_by_name TEXT NOT NULL,
+                shared_at      INTEGER NOT NULL,
+                PRIMARY KEY (group_id, profile_id)
             );
             """
         )
@@ -229,3 +272,173 @@ def _seed_catalog() -> None:
                 "VALUES (?, ?, ?, ?, ?)",
                 (pid, name, desc, "community", json.dumps(payload)),
             )
+
+
+# --- Friend groups ---------------------------------------------------------
+
+def create_group(req: CreateGroupRequest, uid: str, display_name: str) -> str:
+    """Create a group and auto-join the creator as owner. Returns the group id."""
+    group_id = uuid.uuid4().hex
+    now = _now_ms()
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO groups (id, name, owner_uid, created_at) VALUES (?, ?, ?, ?)",
+            (group_id, req.name, uid, now),
+        )
+        conn.execute(
+            "INSERT INTO group_members (group_id, uid, display_name, focus_seconds, joined_at) "
+            "VALUES (?, ?, ?, 0, ?)",
+            (group_id, uid, display_name, now),
+        )
+    return group_id
+
+
+def list_groups(uid: str) -> list[GroupSummary]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT g.id, g.name, COUNT(m2.uid) AS member_count
+            FROM groups g
+            JOIN group_members me ON me.group_id = g.id AND me.uid = ?
+            JOIN group_members m2 ON m2.group_id = g.id
+            GROUP BY g.id, g.name
+            ORDER BY g.created_at DESC
+            """,
+            (uid,),
+        ).fetchall()
+    return [
+        GroupSummary(id=r["id"], name=r["name"], memberCount=r["member_count"])
+        for r in rows
+    ]
+
+
+def is_member(group_id: str, uid: str) -> bool:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM group_members WHERE group_id = ? AND uid = ?",
+            (group_id, uid),
+        ).fetchone()
+    return row is not None
+
+
+def get_group_detail(group_id: str) -> GroupDetail | None:
+    with _connect() as conn:
+        group = conn.execute(
+            "SELECT * FROM groups WHERE id = ?", (group_id,)
+        ).fetchone()
+        if group is None:
+            return None
+        member_rows = conn.execute(
+            "SELECT * FROM group_members WHERE group_id = ? "
+            "ORDER BY focus_seconds DESC, display_name ASC",
+            (group_id,),
+        ).fetchall()
+        profile_rows = conn.execute(
+            "SELECT * FROM group_profiles WHERE group_id = ? ORDER BY shared_at DESC",
+            (group_id,),
+        ).fetchall()
+
+    members = [
+        GroupMember(
+            uid=r["uid"],
+            displayName=r["display_name"],
+            focusSeconds=r["focus_seconds"],
+            isOwner=(r["uid"] == group["owner_uid"]),
+        )
+        for r in member_rows
+    ]
+    shared = [
+        SharedProfile(
+            id=r["profile_id"],
+            name=r["name"],
+            description=r["description"],
+            restrictions=[Restriction(**x) for x in json.loads(r["restrictions"])],
+            sharedByUid=r["shared_by_uid"],
+            sharedByName=r["shared_by_name"],
+        )
+        for r in profile_rows
+    ]
+    return GroupDetail(
+        id=group["id"],
+        name=group["name"],
+        ownerUid=group["owner_uid"],
+        members=members,
+        sharedProfiles=shared,
+    )
+
+
+def create_invite(group_id: str) -> str:
+    """Mint an unguessable invite token for a group. Returns the token."""
+    token = secrets.token_urlsafe(16)
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO group_invites (token, group_id, created_at) VALUES (?, ?, ?)",
+            (token, group_id, _now_ms()),
+        )
+    return token
+
+
+def preview_invite(token: str) -> InvitePreview | None:
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT g.id, g.name FROM group_invites i
+            JOIN groups g ON g.id = i.group_id
+            WHERE i.token = ?
+            """,
+            (token,),
+        ).fetchone()
+    if row is None:
+        return None
+    return InvitePreview(groupId=row["id"], groupName=row["name"])
+
+
+def join_by_token(token: str, uid: str, display_name: str) -> str | None:
+    """Add the caller to the group the token points at. Returns the group id."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT group_id FROM group_invites WHERE token = ?", (token,)
+        ).fetchone()
+        if row is None:
+            return None
+        group_id = row["group_id"]
+        conn.execute(
+            "INSERT INTO group_members (group_id, uid, display_name, focus_seconds, joined_at) "
+            "VALUES (?, ?, ?, 0, ?) "
+            "ON CONFLICT(group_id, uid) DO UPDATE SET display_name=excluded.display_name",
+            (group_id, uid, display_name, _now_ms()),
+        )
+    return group_id
+
+
+def share_profile(group_id: str, req: ShareProfileRequest, uid: str, display_name: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO group_profiles
+                (group_id, profile_id, name, description, restrictions,
+                 shared_by_uid, shared_by_name, shared_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(group_id, profile_id) DO UPDATE SET
+                name=excluded.name,
+                description=excluded.description,
+                restrictions=excluded.restrictions,
+                shared_by_uid=excluded.shared_by_uid,
+                shared_by_name=excluded.shared_by_name,
+                shared_at=excluded.shared_at
+            """,
+            (
+                group_id, req.id, req.name, req.description,
+                json.dumps([x.model_dump() for x in req.restrictions]),
+                uid, display_name, _now_ms(),
+            ),
+        )
+
+
+def report_focus(group_id: str, uid: str, focus_seconds: int) -> None:
+    """Set the caller's leaderboard value for a group (idempotent, absolute)."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE group_members SET focus_seconds = ? WHERE group_id = ? AND uid = ?",
+            (focus_seconds, group_id, uid),
+        )
