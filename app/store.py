@@ -442,3 +442,20 @@ def report_focus(group_id: str, uid: str, focus_seconds: int) -> None:
             "UPDATE group_members SET focus_seconds = ? WHERE group_id = ? AND uid = ?",
             (focus_seconds, group_id, uid),
         )
+
+
+def leave_group(group_id: str, uid: str) -> None:
+    """Remove the caller from a group. If it empties out, delete the group."""
+    with _connect() as conn:
+        conn.execute(
+            "DELETE FROM group_members WHERE group_id = ? AND uid = ?",
+            (group_id, uid),
+        )
+        remaining = conn.execute(
+            "SELECT COUNT(*) AS c FROM group_members WHERE group_id = ?",
+            (group_id,),
+        ).fetchone()["c"]
+        if remaining == 0:
+            conn.execute("DELETE FROM groups WHERE id = ?", (group_id,))
+            conn.execute("DELETE FROM group_invites WHERE group_id = ?", (group_id,))
+            conn.execute("DELETE FROM group_profiles WHERE group_id = ?", (group_id,))

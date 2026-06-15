@@ -190,6 +190,13 @@ def report_focus(
     return {"status": "ok"}
 
 
+@app.post("/groups/{group_id}/leave")
+def leave_group(group_id: str, who: Caller = Depends(caller)) -> dict:
+    _require_member(group_id, who.uid)
+    store.leave_group(group_id, who.uid)
+    return {"status": "ok"}
+
+
 # --- Android App Links + invite landing ------------------------------------
 
 @app.get("/.well-known/assetlinks.json")
